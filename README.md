@@ -44,9 +44,12 @@ What we do here:
 Any environment works — Codespaces, a local venv, Colab.
 
 ```bash
-pip install requests pandas scikit-learn jupyter
+pip install -r requirements.txt
 jupyter notebook
 ```
+
+(`torch` and `transformers` in there are only needed for the BERT part of
+section 4 — drop those three lines if you're skipping it.)
 
 ### Downloading the data
 
@@ -817,3 +820,108 @@ Vector search:
 And Elasticsearch/OpenSearch, Qdrant and the rest now also support hybrid search —
 running the keyword and vector query together and fusing the results, usually with
 RRF, which is section 5 done for you.
+
+## 7. Conclusion — the road from keyword filtering to a fine-tuned LLM
+
+Every step in this notebook exists because the step before it failed at something
+specific. Read the diagram top to bottom: the left column is the idea, the arrow
+label is the problem that forced the next idea, the right branches are the
+production tools that shipped each idea.
+
+```
+  ══════════ 1. EXACT WORDS ═══════════════════════════════════════════════
+
+   keyword filtering  (boolean retrieval, 1960s)
+          │  matches or doesn't - no way to rank 900 hits
+          ▼
+   TF-IDF  (Sparck Jones, 1972)
+          │  now we have a weight per word, but no way to compare two docs
+          ▼
+   cosine similarity / vector space model  (Salton, 1975)
+          │  long documents still game the score
+          ▼
+   BM25  (Robertson & Walker, 1994) ────► Lucene 1999 ──► Elasticsearch 2010
+          │                                                       │
+          │                                                       ▼
+          │                                                  OpenSearch 2021
+          │  "sign up" still never matches "register"
+          ▼
+  ══════════ 2. MEANING, BAG OF WORDS ═════════════════════════════════════
+
+   LSA / SVD  (Deerwester et al., 1990)
+          │  16 dense numbers instead of 1333 sparse ones - synonyms collapse
+          │  together. But the numbers go negative and mean nothing to a human
+          ▼
+   NMF  (Lee & Seung, 1999)
+          │  non-negative, so each column reads as a topic
+          │  still no word order: "docker in kafka" == "kafka in docker"
+          ▼
+  ══════════ 3. MEANING, WORD ORDER ═══════════════════════════════════════
+
+   word2vec / GloVe  (2013 / 2014)
+          │  vectors learned from context, not counts - but one vector per word,
+          │  so "bank" has a single meaning
+          ▼
+   Transformer  (Vaswani et al., 2017)
+          │  attention: every token is read in the context of the others
+          ▼
+   BERT  (Devlin et al., 2018)
+          │  contextual embeddings - but mean-pooled BERT (what we did above)
+          │  was never trained to make similar sentences land close together
+          ▼
+   Sentence-BERT 2019 / DPR 2020 ──► LSH 1998 ──► HNSW 2016, FAISS 2017
+          │   embeddings trained                          │
+          │   for retrieval                               ▼
+          │                                    vector DBs: Qdrant, Weaviate,
+          │  vectors miss the exact term       Milvus, Chroma, pgvector
+          │  you actually typed
+          ▼
+  ══════════ 4. BOTH AT ONCE ══════════════════════════════════════════════
+
+   hybrid search: BM25 + dense vectors, fused with RRF  (Cormack et al., 2009)
+          │  we now return excellent documents. The user wanted an answer
+          ▼
+  ══════════ 5. ANSWERS, NOT LINKS ════════════════════════════════════════
+
+   RAG  (Lewis et al., 2020)  =  this search engine  +  an LLM
+          │  retrieval grounds the model in your documents instead of its weights
+          ▼
+   LLM  (GPT-3, 2020)  ──►  instruction tuning / RLHF  (InstructGPT, 2022)
+          │  generic model, generic tone, no knowledge of your domain jargon
+          ▼
+   fine-tuning  (full FT, or LoRA / PEFT, Hu et al., 2021)
+             teach format, tone and domain vocabulary - NOT facts:
+             facts stay in the retrieval layer, because they change
+```
+
+### Why each step exists
+
+| # | Step | The problem it solves | Why it could not come earlier |
+|---|------|----------------------|-------------------------------|
+| 1 | Keyword filtering | Find documents containing a term at all | The baseline |
+| 2 | TF-IDF | 900 documents match — which one first? Rare words carry more signal than common ones | Needs a corpus to compute document frequency |
+| 3 | Cosine similarity | Turn two weight vectors into one comparable number, independent of length | Needs vectors, i.e. the vector space model |
+| 4 | BM25 | The 20th "kafka" in a doc is not worth as much as the 2nd; long docs shouldn't win by default | A probabilistic refinement of TF-IDF |
+| 5 | Inverted index → Lucene → Elasticsearch/OpenSearch | Scoring all N documents per query doesn't scale | Engineering, not new maths: needed the scoring formula to be settled first |
+| 6 | SVD / LSA | Synonyms. "sign up" and "register" are different columns and can never match | Needs the term-document matrix from steps 2–3 |
+| 7 | NMF | SVD components go negative and are uninterpretable | Same input, a constraint added |
+| 8 | word2vec / GloVe | LSA meaning comes from co-occurrence counts in one corpus; learn it from context on billions of words instead | Needed cheap GPUs and large text dumps |
+| 9 | Transformer | Bag of words and static word vectors both throw away order and context | Needed attention (2014) plus the hardware to train it |
+| 10 | BERT | One vector per word can't disambiguate; BERT gives one vector *per occurrence* | Built directly on the Transformer encoder |
+| 11 | Sentence-BERT / DPR | Mean-pooled BERT is a weak similarity metric — it was trained to fill in masked words, not to rank | Needs labelled query–document pairs to fine-tune on |
+| 12 | LSH / HNSW / FAISS / vector DBs | Comparing a query to 100M dense vectors is a full scan | Only becomes a problem once dense retrieval actually works |
+| 13 | Hybrid search + RRF | Lexical misses synonyms, dense misses exact terms, IDs and error codes | Needs both retrievers to exist |
+| 14 | RAG | The LLM's knowledge is frozen at training time and it invents citations | Needs a retriever *and* a model good enough to read the passages |
+| 15 | LLM + instruction tuning | Users want an answer, not ten links | Needs the scale of GPT-3 and then RLHF to follow instructions |
+| 16 | Fine-tuning / LoRA | Format, tone, domain vocabulary the base model gets wrong | Last resort: it's the expensive knob, and retrieval already fixed the facts |
+
+### The practical takeaway
+
+The order above is also the order to **build** in. Steps 1–5 (BM25 in Elasticsearch)
+solve most of a real search problem for a fraction of the cost. Add dense retrieval
+when you measure that synonyms are actually hurting recall, hybrid when you measure
+that dense alone drops exact matches, and fine-tune last — after retrieval, prompting
+and the ranking are all exhausted.
+
+This notebook stopped at step 13. Step 14 onwards is the
+[LLM RAG workshop](https://github.com/alexeygrigorev/llm-rag-workshop).

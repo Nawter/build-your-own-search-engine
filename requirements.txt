@@ -1,0 +1,14 @@
+# pip install -r requirements.txt
+
+# sections 1-3 (text search) and 4a (SVD / NMF)
+requests
+numpy
+pandas
+scikit-learn
+jupyter
+
+# section 4b (BERT embeddings) - heavy, skip these if you only run 1-3
+torch
+transformers
+tqdm
+ipywidgets
