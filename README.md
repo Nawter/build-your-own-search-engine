@@ -702,16 +702,27 @@ top positions — it is a knob, and 60 is the value from the original paper.
 
 ## 6. Practical Implementation Aspects and Tools
 
-Everything above scores *every* document for *every* query. With 1000 FAQ entries
-that's instant. With 100 million documents it is hopeless. Real systems avoid the
-full scan on both sides: an inverted index for text, and an approximate nearest
-neighbour structure for vectors.
+So far every search we ran compared the query to **every single document**.
+
+With 1000 FAQ entries that is fine, it finishes instantly. With 100 million
+documents it never finishes.
+
+Real search engines don't do it. They first throw away almost everything, then
+score only the handful of documents left. There is one trick for text and one
+trick for vectors. Both are below.
 
 ### Inverted indexes for text search
 
-A forward index maps document → words. Invert it: word → the documents containing
-it. Then a query only has to look at documents that share at least one term with
-it, instead of all of them.
+Think of the index at the back of a textbook. To find "kafka" you don't read all
+800 pages, you look the word up and it hands you the page numbers.
+
+That is exactly an inverted index:
+
+* forward (what we had): document 5 → the words inside it
+* inverted: the word "kafka" → the documents that contain it
+
+Build it once. Then a query only has to look at documents that share at least one
+word with it.
 
 ```python
 import re
@@ -749,19 +760,28 @@ c = candidates('how do I run kafka in docker')
 len(c), len(df)     # score this many documents instead of all of them
 ```
 
-The full scoring formula (TF-IDF, or BM25 in most real engines) then runs only on
-the candidates. The index also stores the term frequencies alongside each doc id,
-so scoring needs no second pass over the text.
+TF-IDF (or BM25) now scores only that short list instead of the whole dataset.
+Same results, a fraction of the work. Real engines also store *how often* each word
+appears next to each document id, so the scoring step never has to open the
+original text again.
 
 ### LSH for vector search (random projections)
 
-Vectors have no words to index, so the trick is different: hash nearby vectors
-into the same bucket *on purpose*. Locality-Sensitive Hashing does exactly the
-opposite of a cryptographic hash — similar inputs should collide.
+Vectors have no words, so there is nothing to look up. We need a different trick:
+**drop similar vectors into the same bucket, then search only one bucket.**
 
-The simplest LSH for cosine similarity is random projections: pick a few random
-hyperplanes, and record which side of each plane the vector falls on. That's one
-bit per plane, and vectors pointing in a similar direction get the same bits.
+A normal hash (MD5, SHA) works hard to give two similar inputs completely
+different outputs. Locality-Sensitive Hashing wants the opposite: similar inputs
+*should* collide.
+
+The easiest one for cosine similarity is random projections:
+
+1. draw a few random lines through the middle of the space
+2. for each line ask: is this vector on the left or the right? → `1` or `0`
+3. glue the bits together, that string is the bucket name
+
+Two vectors pointing in the same direction land on the same side of most lines, so
+they get the same string, so they share a bucket.
 
 ```python
 np.random.seed(1)
@@ -794,32 +814,44 @@ idx = np.array(bucket)[np.argsort(-score)[:5]]
 list(df.iloc[idx].text)
 ```
 
-This is *approximate*: a document just on the other side of one hyperplane lands
-in a different bucket and is never seen, so we trade recall for speed. Real
-implementations build several independent hash tables and search the union of the
-matching buckets, which makes a miss in one table survivable. More bits = smaller
-buckets = faster but less accurate; fewer bits = the opposite.
+This is **approximate**, and that is the whole point. A document sitting just on
+the wrong side of one line falls into another bucket and we never look at it. We
+lose a few good results and gain a lot of speed.
 
-HNSW, the graph-based index used by most current vector databases, solves the same
-problem in a different way, but the trade-off is identical: approximate results in
-exchange for not scanning everything.
+One knob, two directions:
+
+* more bits → more, smaller buckets → faster, but more misses
+* fewer bits → fewer, bigger buckets → slower, but safer
+
+Real implementations build several tables, each with its own random lines, and
+search every matching bucket. A miss in one table is usually caught by another.
+
+HNSW, the index most vector databases use today, does the same job with a graph
+instead of buckets. Different structure, identical deal: skip almost everything,
+accept a few misses.
 
 ### Technologies
 
-Text search:
+Nobody writes the above by hand in production. Here is what people actually use.
 
-* **Lucene** — the Java library implementing the inverted index and BM25 scoring.
-* **Elasticsearch** / **OpenSearch** — distributed search engines built on Lucene, adding an HTTP API, sharding and replication. This is what you reach for instead of the `TextSearch` class above.
+**Text search**
 
-Vector search:
+| Tool | What it is |
+|---|---|
+| **Lucene** | The Java library that does the inverted index and BM25 scoring. The actual engine. |
+| **Elasticsearch** / **OpenSearch** | Lucene wrapped in a server: HTTP API, many machines, replication. OpenSearch is the open-source fork of Elasticsearch. |
 
-* **FAISS** — Facebook AI Similarity Search, a library of ANN indexes (flat, IVF, HNSW, product quantization). A library, not a server: it lives in your process.
-* **Vector databases** — Qdrant, Weaviate, Milvus, Chroma, Pinecone: they add persistence, metadata filtering and an API on top of an ANN index.
-* **pgvector** — a Postgres extension, if you'd rather not run another service.
+**Vector search**
 
-And Elasticsearch/OpenSearch, Qdrant and the rest now also support hybrid search —
-running the keyword and vector query together and fusing the results, usually with
-RRF, which is section 5 done for you.
+| Tool | What it is |
+|---|---|
+| **FAISS** | A library of fast approximate-nearest-neighbour indexes. Runs inside your Python process, no server, no storage. |
+| **Qdrant, Weaviate, Milvus, Chroma, Pinecone** | Vector *databases*: the same indexes plus storage, filtering on metadata, and an API. |
+| **pgvector** | A Postgres extension. Use it when you'd rather not run one more service. |
+
+Good news for section 5: Elasticsearch, OpenSearch, Qdrant and most of the others
+already do hybrid search for you. Send both queries, they fuse the results with
+RRF.
 
 ## 7. Conclusion — the road from keyword filtering to a fine-tuned LLM
 
